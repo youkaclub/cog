@@ -86,7 +86,7 @@ $ cog run jupyter notebook
 
 Cog does a number of things out of the box to help you deploy models to production:
 
-- **Standard interface.** Put models inside Cog containers, and they'll run anywhere that runs Cog containers.
+- **Standard interface.** Put models inside Cog containers, and they'll run anywhere that runs Docker containers.
 - **HTTP prediction server, based on FastAPI.**
 - **Type checking, based on Pydantic.** Cog models define their input and output with JSON Schema, and the HTTP server is defined with OpenAPI.
 - **AMQP RPC interface.** Long-running deep learning models or batch processing is best architected with a queue. Cog models can do this out of the box.
