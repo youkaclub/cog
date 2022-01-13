@@ -15,7 +15,7 @@ setuptools.setup(
     license="Apache License 2.0",
     python_requires=">=3.6.0",
     install_requires=[
-        # intionally loose. perhaps these should be vendored to not collide with user code?
+        # intentionally loose. perhaps these should be vendored to not collide with user code?
         "fastapi>=0.6,<1",
         "pydantic>=1,<2",
         "PyYAML",
