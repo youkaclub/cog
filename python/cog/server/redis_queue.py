@@ -128,22 +128,25 @@ class RedisQueueWorker:
 
     def start(self):
         print('STARTING THE REDIS QUEUE')
-        # print("STARTING AMQP")
-        # connection = pika.BlockingConnection()
-        # channel = connection.channel()
-        #
-        # keep_running = True  # Just hardcoding for now
-        # while keep_running:
-        #     try:
-        #         for method_frame, properties, body in channel.consume(
-        #                 'TEST_QUEUE_NAME'):
-        #             # Display the message parts and acknowledge the message
-        #             print(method_frame, properties, body)
-        #             channel.basic_ack(method_frame.delivery_tag)
-        #         time.sleep(1)
-        #     except Exception:
-        #         tb = traceback.format_exc()
-        #         sys.stderr.write(f"Failed to handle message: {tb}\n")
+        print("STARTING AMQP")
+        credentials = pika.PlainCredentials('guest', 'guest')
+        parameters = pika.ConnectionParameters('rabbitmq', 5672, '/', credentials)
+        connection = pika.BlockingConnection(parameters)
+        channel = connection.channel()
+
+        keep_running = True  # Just hardcoding for now
+        while keep_running:
+            try:
+                for method_frame, properties, body in channel.consume(
+                        'TEST_QUEUE_NAME'):
+                    # Display the message parts and acknowledge the message
+                    print('Printing message details: ')
+                    print(method_frame, properties, body)
+                    channel.basic_ack(method_frame.delivery_tag)
+                time.sleep(1)
+            except Exception:
+                tb = traceback.format_exc()
+                sys.stderr.write(f"Failed to handle message: {tb}\n")
 
 
 
@@ -360,6 +363,6 @@ def _queue_worker_from_argv(
 
 if __name__ == "__main__":
     predictor = load_predictor()
-
+    # *sys.argv[1:] is redis_host arg from http serving
     worker = _queue_worker_from_argv(predictor, *sys.argv[1:])
     worker.start()
