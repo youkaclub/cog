@@ -1,4 +1,5 @@
 from io import BytesIO
+import pika
 import json
 from pathlib import Path
 from typing import Optional
@@ -126,67 +127,89 @@ class RedisQueueWorker:
         return key.decode(), raw_message[b"value"].decode()
 
     def start(self):
-        signal.signal(signal.SIGTERM, self.signal_exit)
-        start_time = time.time()
+        print('STARTING THE REDIS QUEUE')
+        # print("STARTING AMQP")
+        # connection = pika.BlockingConnection()
+        # channel = connection.channel()
+        #
+        # keep_running = True  # Just hardcoding for now
+        # while keep_running:
+        #     try:
+        #         for method_frame, properties, body in channel.consume(
+        #                 'TEST_QUEUE_NAME'):
+        #             # Display the message parts and acknowledge the message
+        #             print(method_frame, properties, body)
+        #             channel.basic_ack(method_frame.delivery_tag)
+        #         time.sleep(1)
+        #     except Exception:
+        #         tb = traceback.format_exc()
+        #         sys.stderr.write(f"Failed to handle message: {tb}\n")
 
-        # TODO(bfirsh): setup should time out too, but we don't display these logs to the user, so don't timeout to avoid confusion
-        with self.capture_log(self.STAGE_SETUP, self.model_id):
-            self.predictor.setup()
 
-        setup_time = time.time() - start_time
-        self.redis.xadd(
-            self.setup_time_queue,
-            fields={"duration": setup_time},
-            maxlen=self.stats_queue_length,
-        )
-        sys.stderr.write(f"Setup time: {setup_time:.2f}\n")
 
-        sys.stderr.write(f"Waiting for message on {self.input_queue}\n")
-        while not self.should_exit:
-            try:
-                message_id, message_json = self.receive_message()
-                if message_json is None:
-                    # tight loop in order to respect self.should_exit
-                    continue
 
-                message = json.loads(message_json)
-                prediction_id = message["id"]
-                response_queue = message["response_queue"]
-                sys.stderr.write(
-                    f"Received message {prediction_id} on {self.input_queue}\n"
-                )
-                cleanup_functions = []
-                try:
-                    start_time = time.time()
-                    self.handle_message(response_queue, message, cleanup_functions)
-                    self.redis.xack(self.input_queue, self.input_queue, message_id)
-                    self.redis.xdel(
-                        self.input_queue, message_id
-                    )  # xdel to be able to get stream size
-                    run_time = time.time() - start_time
-                    self.redis.xadd(
-                        self.predict_time_queue,
-                        fields={"duration": run_time},
-                        maxlen=self.stats_queue_length,
-                    )
-                    sys.stderr.write(f"Run time: {run_time:.2f}\n")
-                except Exception as e:
-                    tb = traceback.format_exc()
 
-                    with self.capture_log(self.STAGE_RUN, prediction_id):
-                        sys.stderr.write(f"{tb}\n")
-                    self.push_error(response_queue, e)
-                    self.redis.xack(self.input_queue, self.input_queue, message_id)
-                    self.redis.xdel(self.input_queue, message_id)
-                finally:
-                    for cleanup_function in cleanup_functions:
-                        try:
-                            cleanup_function()
-                        except Exception as e:
-                            sys.stderr.write(f"Cleanup function caught error: {e}")
-            except Exception as e:
-                tb = traceback.format_exc()
-                sys.stderr.write(f"Failed to handle message: {tb}\n")
+        # signal.signal(signal.SIGTERM, self.signal_exit)
+        # start_time = time.time()
+        #
+        # # TODO(bfirsh): setup should time out too, but we don't display these logs to the user, so don't timeout to avoid confusion
+        # with self.capture_log(self.STAGE_SETUP, self.model_id):
+        #     self.predictor.setup()
+        #
+        # setup_time = time.time() - start_time
+        # self.redis.xadd(
+        #     self.setup_time_queue,
+        #     fields={"duration": setup_time},
+        #     maxlen=self.stats_queue_length,
+        # )
+        # sys.stderr.write(f"Setup time: {setup_time:.2f}\n")
+        #
+        # sys.stderr.write(f"Waiting for message on {self.input_queue}\n")
+        # while not self.should_exit:
+        #     try:
+        #         message_id, message_json = self.receive_message()
+        #         if message_json is None:
+        #             # tight loop in order to respect self.should_exit
+        #             continue
+        #
+        #         message = json.loads(message_json)
+        #         prediction_id = message["id"]
+        #         response_queue = message["response_queue"]
+        #         sys.stderr.write(
+        #             f"Received message {prediction_id} on {self.input_queue}\n"
+        #         )
+        #         cleanup_functions = []
+        #         try:
+        #             start_time = time.time()
+        #             self.handle_message(response_queue, message, cleanup_functions)
+        #             self.redis.xack(self.input_queue, self.input_queue, message_id)
+        #             self.redis.xdel(
+        #                 self.input_queue, message_id
+        #             )  # xdel to be able to get stream size
+        #             run_time = time.time() - start_time
+        #             self.redis.xadd(
+        #                 self.predict_time_queue,
+        #                 fields={"duration": run_time},
+        #                 maxlen=self.stats_queue_length,
+        #             )
+        #             sys.stderr.write(f"Run time: {run_time:.2f}\n")
+        #         except Exception as e:
+        #             tb = traceback.format_exc()
+        #
+        #             with self.capture_log(self.STAGE_RUN, prediction_id):
+        #                 sys.stderr.write(f"{tb}\n")
+        #             self.push_error(response_queue, e)
+        #             self.redis.xack(self.input_queue, self.input_queue, message_id)
+        #             self.redis.xdel(self.input_queue, message_id)
+        #         finally:
+        #             for cleanup_function in cleanup_functions:
+        #                 try:
+        #                     cleanup_function()
+        #                 except Exception as e:
+        #                     sys.stderr.write(f"Cleanup function caught error: {e}")
+        #     except Exception as e:
+        #         tb = traceback.format_exc()
+        #         sys.stderr.write(f"Failed to handle message: {tb}\n")
 
     def handle_message(self, response_queue, message, cleanup_functions):
         inputs = {}
