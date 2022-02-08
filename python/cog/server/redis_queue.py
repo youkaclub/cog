@@ -143,9 +143,10 @@ class RedisQueueWorker:
                     print('Printing message details: ')
                     print(method_frame, properties, body)
                     message = json.loads(body)
-                    response_queue=""
+                    response_queue = json.loads(body)['response_queue']
+                    channel.queue_declare(queue=response_queue)
                     cleanup_functions=[]  # This is supposed to be an empty list
-                    self.handle_message(response_queue, message, cleanup_functions)
+                    self.handle_message(channel, response_queue, message, cleanup_functions)
 
 
 
@@ -155,73 +156,7 @@ class RedisQueueWorker:
                 tb = traceback.format_exc()
                 sys.stderr.write(f"Failed to handle message: {tb}\n")
 
-
-
-
-
-        # signal.signal(signal.SIGTERM, self.signal_exit)
-        # start_time = time.time()
-        #
-        # # TODO(bfirsh): setup should time out too, but we don't display these logs to the user, so don't timeout to avoid confusion
-        # with self.capture_log(self.STAGE_SETUP, self.model_id):
-        #     self.predictor.setup()
-        #
-        # setup_time = time.time() - start_time
-        # self.redis.xadd(
-        #     self.setup_time_queue,
-        #     fields={"duration": setup_time},
-        #     maxlen=self.stats_queue_length,
-        # )
-        # sys.stderr.write(f"Setup time: {setup_time:.2f}\n")
-        #
-        # sys.stderr.write(f"Waiting for message on {self.input_queue}\n")
-        # while not self.should_exit:
-        #     try:
-        #         message_id, message_json = self.receive_message()
-        #         if message_json is None:
-        #             # tight loop in order to respect self.should_exit
-        #             continue
-        #
-        #         message = json.loads(message_json)
-        #         prediction_id = message["id"]
-        #         response_queue = message["response_queue"]
-        #         sys.stderr.write(
-        #             f"Received message {prediction_id} on {self.input_queue}\n"
-        #         )
-        #         cleanup_functions = []
-        #         try:
-        #             start_time = time.time()
-        #             self.handle_message(response_queue, message, cleanup_functions)
-        #             self.redis.xack(self.input_queue, self.input_queue, message_id)
-        #             self.redis.xdel(
-        #                 self.input_queue, message_id
-        #             )  # xdel to be able to get stream size
-        #             run_time = time.time() - start_time
-        #             self.redis.xadd(
-        #                 self.predict_time_queue,
-        #                 fields={"duration": run_time},
-        #                 maxlen=self.stats_queue_length,
-        #             )
-        #             sys.stderr.write(f"Run time: {run_time:.2f}\n")
-        #         except Exception as e:
-        #             tb = traceback.format_exc()
-        #
-        #             with self.capture_log(self.STAGE_RUN, prediction_id):
-        #                 sys.stderr.write(f"{tb}\n")
-        #             self.push_error(response_queue, e)
-        #             self.redis.xack(self.input_queue, self.input_queue, message_id)
-        #             self.redis.xdel(self.input_queue, message_id)
-        #         finally:
-        #             for cleanup_function in cleanup_functions:
-        #                 try:
-        #                     cleanup_function()
-        #                 except Exception as e:
-        #                     sys.stderr.write(f"Cleanup function caught error: {e}")
-        #     except Exception as e:
-        #         tb = traceback.format_exc()
-        #         sys.stderr.write(f"Failed to handle message: {tb}\n")
-
-    def handle_message(self, response_queue, message, cleanup_functions):
+    def handle_message(self, channel, response_queue, message, cleanup_functions):
         self.predictor.setup()
         inputs = {}
         raw_inputs = message["inputs"]
@@ -244,7 +179,7 @@ class RedisQueueWorker:
         except InputValidationError as e:
             tb = traceback.format_exc()
             sys.stderr.write(tb)
-            # self.push_error(response_queue, e)
+            self.push_error(channel, response_queue, e)
             return
 
         start_time = time.time()
@@ -267,7 +202,7 @@ class RedisQueueWorker:
                 # push the previous result, so we can eventually detect the last iteration
                 if last_result is not None:
                     print('processing')
-                    # self.push_result(response_queue, last_result, status="processing")
+                    self.push_result(channel, response_queue, last_result, status="processing")
                 if isinstance(result, Path):
                     cleanup_functions.append(result.unlink)
                 last_result = result
@@ -276,21 +211,21 @@ class RedisQueueWorker:
             print('RESULT')
             print(last_result)
             print('success')
-            # self.push_result(response_queue, last_result, status="success")
+            self.push_result(channel, response_queue, last_result, status="success")
         else:
             if isinstance(return_value, Path):
                 cleanup_functions.append(return_value.unlink)
             print('RETURN VALUE')
             print(return_value)
             print('SUCCESS')
-            # self.push_result(response_queue, return_value, status="success")
+            self.push_result(channel, response_queue, return_value, status="success")
 
     def download(self, url):
         resp = requests.get(url)
         resp.raise_for_status()
         return resp.content
 
-    def push_error(self, response_queue, error):
+    def push_error(self, channel, response_queue, error):
         message = json.dumps(
             {
                 "status": "failed",
@@ -298,9 +233,11 @@ class RedisQueueWorker:
             }
         )
         sys.stderr.write(f"Pushing error to {response_queue}\n")
-        self.redis.rpush(response_queue, message)
+        channel.basic_publish(exchange='',
+                              routing_key=response_queue,
+                              body=message)
 
-    def push_result(self, response_queue, result, status):
+    def push_result(self, channel,  response_queue, result, status):
         if isinstance(result, Path):
             message = {
                 "file": {
@@ -320,7 +257,9 @@ class RedisQueueWorker:
         message["status"] = status
 
         sys.stderr.write(f"Pushing successful result to {response_queue}\n")
-        self.redis.rpush(response_queue, json.dumps(message))
+        channel.basic_publish(exchange='',
+                              routing_key=response_queue,
+                              body=json.dumps(message))
 
     def upload_to_temp(self, path: Path) -> str:
         sys.stderr.write(
