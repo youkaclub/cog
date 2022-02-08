@@ -142,6 +142,13 @@ class RedisQueueWorker:
                     # Display the message parts and acknowledge the message
                     print('Printing message details: ')
                     print(method_frame, properties, body)
+                    message = json.loads(body)
+                    response_queue=""
+                    cleanup_functions=[]  # This is supposed to be an empty list
+                    self.handle_message(response_queue, message, cleanup_functions)
+
+
+
                     channel.basic_ack(method_frame.delivery_tag)
                 time.sleep(1)
             except Exception:
@@ -215,6 +222,7 @@ class RedisQueueWorker:
         #         sys.stderr.write(f"Failed to handle message: {tb}\n")
 
     def handle_message(self, response_queue, message, cleanup_functions):
+        self.predictor.setup()
         inputs = {}
         raw_inputs = message["inputs"]
         prediction_id = message["id"]
@@ -236,7 +244,7 @@ class RedisQueueWorker:
         except InputValidationError as e:
             tb = traceback.format_exc()
             sys.stderr.write(tb)
-            self.push_error(response_queue, e)
+            # self.push_error(response_queue, e)
             return
 
         start_time = time.time()
@@ -258,17 +266,24 @@ class RedisQueueWorker:
                     break
                 # push the previous result, so we can eventually detect the last iteration
                 if last_result is not None:
-                    self.push_result(response_queue, last_result, status="processing")
+                    print('processing')
+                    # self.push_result(response_queue, last_result, status="processing")
                 if isinstance(result, Path):
                     cleanup_functions.append(result.unlink)
                 last_result = result
 
             # push the last result
-            self.push_result(response_queue, last_result, status="success")
+            print('RESULT')
+            print(last_result)
+            print('success')
+            # self.push_result(response_queue, last_result, status="success")
         else:
             if isinstance(return_value, Path):
                 cleanup_functions.append(return_value.unlink)
-            self.push_result(response_queue, return_value, status="success")
+            print('RETURN VALUE')
+            print(return_value)
+            print('SUCCESS')
+            # self.push_result(response_queue, return_value, status="success")
 
     def download(self, url):
         resp = requests.get(url)
