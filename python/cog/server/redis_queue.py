@@ -114,7 +114,7 @@ class RedisQueueWorker:
                     message = json.loads(body)
                     print(f'PREETHI: message: {message}')
                     response_queue = json.loads(body)['response_queue']
-                    channel.queue_declare(queue=response_queue)
+                    # channel.queue_declare(queue=response_queue)
                     cleanup_functions=[]  # This is supposed to be an empty list
                     self.handle_message(channel, response_queue, message, message_id, cleanup_functions)
 
