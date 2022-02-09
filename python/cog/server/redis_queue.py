@@ -93,39 +93,6 @@ class RedisQueueWorker:
         self.should_exit = True
         sys.stderr.write("Caught SIGTERM, exiting...\n")
 
-    def receive_message(self):
-        # first, try to autoclaim old messages from pending queue
-        raw_messages = self.redis.execute_command(
-            "XAUTOCLAIM",
-            self.input_queue,
-            self.input_queue,
-            self.consumer_id,
-            str(self.max_processing_time * 1000),
-            "0-0",
-            "COUNT",
-            1,
-        )
-        # format: [[b'1619393873567-0', [b'mykey', b'myval']]]
-        if raw_messages and raw_messages[0] is not None:
-            key, raw_message = raw_messages[0]
-            assert raw_message[0] == b"value"
-            return key.decode(), raw_message[1].decode()
-
-        # if no old messages exist, get message from main queue
-        raw_messages = self.redis.xreadgroup(
-            groupname=self.input_queue,
-            consumername=self.consumer_id,
-            streams={self.input_queue: ">"},
-            count=1,
-            block=1000,
-        )
-        if not raw_messages:
-            return None, None
-
-        # format: [[b'mystream', [(b'1619395583065-0', {b'mykey': b'myval6'})]]]
-        key, raw_message = raw_messages[0][1][0]
-        return key.decode(), raw_message[b"value"].decode()
-
     def start(self):
         print('STARTING THE REDIS QUEUE')
         print("STARTING AMQP")
@@ -141,12 +108,15 @@ class RedisQueueWorker:
                         'TEST_QUEUE_NAME'):
                     # Display the message parts and acknowledge the message
                     print('Printing message details: ')
+                    message_id = properties.message_id
+                    print(f'message_id: {message_id}')
                     print(method_frame, properties, body)
                     message = json.loads(body)
+                    print(f'PREETHI: message: {message}')
                     response_queue = json.loads(body)['response_queue']
                     channel.queue_declare(queue=response_queue)
                     cleanup_functions=[]  # This is supposed to be an empty list
-                    self.handle_message(channel, response_queue, message, cleanup_functions)
+                    self.handle_message(channel, response_queue, message, message_id, cleanup_functions)
 
 
 
@@ -156,12 +126,12 @@ class RedisQueueWorker:
                 tb = traceback.format_exc()
                 sys.stderr.write(f"Failed to handle message: {tb}\n")
 
-    def handle_message(self, channel, response_queue, message, cleanup_functions):
+    def handle_message(self, channel, response_queue, message, message_id, cleanup_functions):
         self.predictor.setup()
         inputs = {}
         raw_inputs = message["inputs"]
         prediction_id = message["id"]
-
+        print(f'PREETHI: raw_inputs: {raw_inputs}')
         for k, v in raw_inputs.items():
             if "value" in v and v["value"] != "":
                 inputs[k] = v["value"]
@@ -173,13 +143,14 @@ class RedisQueueWorker:
                     stream=BytesIO(value_bytes), filename=v["file"]["name"]
                 )
         try:
+            print(f'ALL INPUTS: {inputs}')
             inputs = validate_and_convert_inputs(
                 self.predictor, inputs, cleanup_functions
             )
         except InputValidationError as e:
             tb = traceback.format_exc()
             sys.stderr.write(tb)
-            self.push_error(channel, response_queue, e)
+            self.push_error(channel, response_queue, message_id, e)
             return
 
         start_time = time.time()
@@ -202,7 +173,7 @@ class RedisQueueWorker:
                 # push the previous result, so we can eventually detect the last iteration
                 if last_result is not None:
                     print('processing')
-                    self.push_result(channel, response_queue, last_result, status="processing")
+                    self.push_result(channel, response_queue, last_result, message_id, status="processing")
                 if isinstance(result, Path):
                     cleanup_functions.append(result.unlink)
                 last_result = result
@@ -211,33 +182,31 @@ class RedisQueueWorker:
             print('RESULT')
             print(last_result)
             print('success')
-            self.push_result(channel, response_queue, last_result, status="success")
+            self.push_result(channel, response_queue, last_result, message_id, status="success")
         else:
             if isinstance(return_value, Path):
                 cleanup_functions.append(return_value.unlink)
             print('RETURN VALUE')
             print(return_value)
             print('SUCCESS')
-            self.push_result(channel, response_queue, return_value, status="success")
+            self.push_result(channel, response_queue, return_value, message_id, status="success")
 
     def download(self, url):
         resp = requests.get(url)
         resp.raise_for_status()
         return resp.content
 
-    def push_error(self, channel, response_queue, error):
-        message = json.dumps(
-            {
+    def push_error(self, channel, response_queue, message_id, error):
+        message = {
                 "status": "failed",
                 "error": str(error),
             }
-        )
         sys.stderr.write(f"Pushing error to {response_queue}\n")
-        channel.basic_publish(exchange='',
-                              routing_key=response_queue,
-                              body=message)
+        print(f'ERROR MESSAGEID: {message_id}')
+        print(f"ERROR MESSAGE: {message}")
+        self.send_amqp_message(channel, response_queue, message_id, json.dumps(message))
 
-    def push_result(self, channel,  response_queue, result, status):
+    def push_result(self, channel,  response_queue, result, message_id, status):
         if isinstance(result, Path):
             message = {
                 "file": {
@@ -257,9 +226,17 @@ class RedisQueueWorker:
         message["status"] = status
 
         sys.stderr.write(f"Pushing successful result to {response_queue}\n")
+        self.send_amqp_message(channel, response_queue, message_id, json.dumps(message))
+        print('Pushed success result')
+
+    @staticmethod
+    def send_amqp_message(channel, response_queue, message_id, message_body):
+        print(f'About to send amqp w message_id: {message_id}')
         channel.basic_publish(exchange='',
                               routing_key=response_queue,
-                              body=json.dumps(message))
+                              properties=pika.BasicProperties(message_id=message_id),
+                              body=json.dumps(message_body))
+        print('Sent AMQP')
 
     def upload_to_temp(self, path: Path) -> str:
         sys.stderr.write(
