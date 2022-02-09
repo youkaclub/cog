@@ -204,7 +204,7 @@ class RedisQueueWorker:
         sys.stderr.write(f"Pushing error to {response_queue}\n")
         print(f'ERROR MESSAGEID: {message_id}')
         print(f"ERROR MESSAGE: {message}")
-        self.send_amqp_message(channel, response_queue, message_id, json.dumps(message))
+        self.send_amqp_message(channel, response_queue, message_id, message)
 
     def push_result(self, channel,  response_queue, result, message_id, status):
         if isinstance(result, Path):
@@ -226,7 +226,7 @@ class RedisQueueWorker:
         message["status"] = status
 
         sys.stderr.write(f"Pushing successful result to {response_queue}\n")
-        self.send_amqp_message(channel, response_queue, message_id, json.dumps(message))
+        self.send_amqp_message(channel, response_queue, message_id, message)
         print('Pushed success result')
 
     @staticmethod
