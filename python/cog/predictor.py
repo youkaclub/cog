@@ -13,7 +13,10 @@ from typing_extensions import Literal, get_origin, get_args
 import yaml
 
 from .errors import ConfigDoesNotExist, PredictorNotSet
-from .types import Input
+from .types import Input, Path as CogPath, File as CogFile
+
+
+allowed_input_types = [str, int, float, bool, CogFile, CogPath]
 
 
 class BasePredictor(ABC):
@@ -92,9 +95,14 @@ def get_input_type(predictor: BasePredictor):
     for name, parameter in signature.parameters.items():
         annotation = parameter.annotation
 
-        if not annotation:
-            # TODO: perhaps should throw error if there are arguments not annotated?
-            continue
+        if annotation == inspect.Signature.empty:
+            raise TypeError(
+                f"No input type provided for parameter `{name}`. Supported output types are: {get_readable_type_names(allowed_input_types)}."
+            )
+        elif annotation not in allowed_input_types:
+            raise TypeError(
+                f"Unsupported input type {get_type_name(annotation)} for parameter `{name}`. Supported output types are: {get_readable_type_names(allowed_input_types)}."
+            )
 
         # if no default is specified, create an empty, required input
         if parameter.default is inspect.Signature.empty:
@@ -159,3 +167,16 @@ For example:
         __root__: OutputType
 
     return Output
+
+
+def get_type_name(t):
+    module = t.__module__
+    if module == "builtins":
+        return t.__qualname__
+    elif module.split(".")[0] == "cog":
+        module = "cog"
+    return module + "." + t.__qualname__
+
+
+def get_readable_type_names(type_list):
+    return ", ".join(get_type_name(t) for t in type_list)
