@@ -121,3 +121,45 @@ class Predictor(BasePredictor):
     def predict(self) -> Output:
         return Output(text="hello", file=io.StringIO("hello"))
 ```
+
+## Upgrading from Cog 0.x to 1.x
+
+In Cog versions up to 0.0.20 you described inputs using annotations on your `predict` method. For example:
+
+```py
+@cog.input("image", type=Path, help="Image to enlarge")
+@cog.input("scale", type=float, default=1.5, help="Factor to scale image by")
+def predict(self, image, scale):
+    ...
+```
+
+From Cog 1.0.0 onwards, we've started using [Pydantic](https://pydantic-docs.helpmanual.io/) to define input and output types. Rather than describing inputs using annotations, you now describe them with type hinting. Here's how you'd define the same inputs now:
+
+```py
+def predict(self,
+    image: Path = Input(description="Image to enlarge"),
+    scale: float = Input(description="Factor to scale image by", default=1.5)
+) -> Path:
+    ...
+```
+
+The parameters that `Input()` takes are pretty similar to those `@cog.input()` used to take. Here are the differences:
+
+- It no longer takes a `type` parameter; use a type hint instead.
+- The `help` parameter has been renamed to `description`.
+- The `options` parameter has been renamed to `choice`.
+- The `min` option has been replaced by two options:
+    - `ge`: greater than or equal to (direct replacement)
+    - `gt`: greater than (a new alternative)
+- The `max` option has been replaced by two options:
+    - `le`: less than or equal to (direct replacement)
+    - `lt`: less than (a new alternative)
+
+The other major difference is that you now need to define the output type of your model. That's the `-> Path` bit in the example above. That might be a simple type like `str`, `float` or `bool`. If you need to handle multiple outputs, check out the [new documentation for complex output objects](…). If you only have a single output, but it can be of different types depending on the run, you can use `typing.Any`:
+
+```py
+from typing import Any
+
+def predict(self) -> Any:
+    ...
+```
