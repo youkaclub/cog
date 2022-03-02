@@ -2,7 +2,7 @@ import base64
 import io
 import os
 import tempfile
-from typing import Generator
+from typing import Generator, Any
 from unittest import mock
 
 from fastapi.testclient import TestClient
@@ -361,7 +361,7 @@ def test_openapi_specification_with_custom_user_defined_output_type_called_outpu
     class Predictor(BasePredictor):
         def predict(
             self,
-        ) -> Output:
+        ) -> Any:
             pass
 
     client = make_client(Predictor())
