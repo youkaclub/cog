@@ -171,7 +171,10 @@ class RedisQueueWorker:
                     )
                     sys.stderr.write(f"Run time: {run_time:.2f}\n")
                 except Exception as e:
-                    self.push_error(response_queue, e)
+                    tb = traceback.format_exc()
+                    self.push_error(
+                        response_queue, "Exception... " + str(e) + tb + str(message)
+                    )
                     self.redis.xack(self.input_queue, self.input_queue, message_id)
                     self.redis.xdel(self.input_queue, message_id)
                 finally:
@@ -190,7 +193,9 @@ class RedisQueueWorker:
         except ValidationError as e:
             tb = traceback.format_exc()
             sys.stderr.write(tb)
-            self.push_error(response_queue, e)
+            self.push_error(
+                response_queue, "ValidationError... " + str(e) + tb + str(message)
+            )
             return
 
         cleanup_functions.append(input_obj.cleanup)

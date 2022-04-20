@@ -3,6 +3,7 @@ import multiprocessing
 import os
 import sys
 import time
+import traceback
 import types
 
 from pydantic import BaseModel
@@ -176,7 +177,8 @@ class PredictionRunner:
                     self.predictor_pipe_writer.send(self.OutputType.SINGLE)
                     self.predictor_pipe_writer.send(make_pickleable(output))
             except Exception as e:
-                self.error_pipe_writer.send(e)
+                tb = traceback.format_exc()
+                self.error_pipe_writer.send(str(e) + tb)
 
         self.done_pipe_writer.send(self.PREDICTION_DONE)
 
