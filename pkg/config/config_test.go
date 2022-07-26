@@ -55,6 +55,51 @@ foo==1.0.0`
 	require.Equal(t, expected, requirements)
 }
 
+func TestPythonRequirementsWorksWithLinesCogCannotParse(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "cog-test")
+	require.NoError(t, err)
+	err = ioutil.WriteFile(path.Join(tmpDir, "requirements.txt"), []byte(`foo==1.0.0
+# a torch which already has a version
+torch==1.7.1+cu110
+# complex requirements
+fastapi>=0.6,<1
+flask>0.4
+# comments!
+# blank lines!
+
+# arguments
+-f http://example.com
+`), 0o644)
+	require.NoError(t, err)
+
+	config := &Config{
+		Build: &Build{
+			GPU:                true,
+			PythonVersion:      "3.8",
+			PythonRequirements: "requirements.txt",
+		},
+	}
+	err = config.ValidateAndComplete(tmpDir)
+	require.NoError(t, err)
+
+	requirements, err := config.PythonRequirementsForArch("", "")
+	require.NoError(t, err)
+	expected := `foo==1.0.0
+# a torch which already has a version
+torch==1.7.1+cu110
+# complex requirements
+fastapi>=0.6,<1
+flask>0.4
+# comments!
+# blank lines!
+
+# arguments
+-f http://example.com
+`
+	require.Equal(t, expected, requirements)
+
+}
+
 func TestValidateAndCompleteCUDAForAllTF(t *testing.T) {
 	for _, compat := range TFCompatibilityMatrix {
 		config := &Config{
@@ -150,44 +195,6 @@ func TestUnsupportedTorch(t *testing.T) {
 		},
 	}
 	err = config.ValidateAndComplete("")
-	require.NoError(t, err)
-	require.Equal(t, "9.1", config.Build.CUDA)
-	require.Equal(t, "7", config.Build.CuDNN)
-
-}
-
-func TestUnsupportedTensorflow(t *testing.T) {
-	// Ensure version is not known by Cog
-	cuda, cudnn, err := cudaFromTF("0.4.1")
-	require.NoError(t, err)
-	require.Equal(t, cuda, "")
-	require.Equal(t, cudnn, "")
-
-	// Unknown versions require cuda
-	config := &Config{
-		Build: &Build{
-			GPU:           true,
-			PythonVersion: "3.8",
-			PythonPackages: []string{
-				"tensorflow==0.4.1",
-			},
-		},
-	}
-	err = config.validateAndCompleteCUDA()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "Cog doesn't know what CUDA version is compatible with tensorflow==0.4.1.")
-
-	config = &Config{
-		Build: &Build{
-			GPU:           true,
-			CUDA:          "9.1",
-			PythonVersion: "3.8",
-			PythonPackages: []string{
-				"tensorflow==0.4.1",
-			},
-		},
-	}
-	err = config.validateAndCompleteCUDA()
 	require.NoError(t, err)
 	require.Equal(t, "9.1", config.Build.CUDA)
 	require.Equal(t, "7", config.Build.CuDNN)
