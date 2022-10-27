@@ -12,6 +12,7 @@ import traceback
 import time
 import types
 import contextlib
+from argparse import ArgumentParser
 
 from pydantic import ValidationError
 import redis
@@ -524,5 +525,37 @@ if __name__ == "__main__":
     config = load_config()
     predictor = load_predictor(config)
 
-    worker = _queue_worker_from_argv(predictor, *sys.argv[1:])
+    parser = ArgumentParser()
+
+    # accept positional arguments for backwards compatibility
+    # TODO remove this in a future version of Cog
+    parser.add_argument("positional_args", nargs="*")
+
+    parser.add_argument("--redis-host")
+    parser.add_argument("--redis-port", type=int)
+    parser.add_argument("--input-queue")
+    parser.add_argument("--upload-url")
+    parser.add_argument("--consumer-id")
+    parser.add_argument("--model-id")
+    parser.add_argument("--predict-timeout", type=int)
+
+    args = parser.parse_args()
+
+    if len(args.positional_args) > 0:
+        sys.stderr.write(
+            "Positional arguments for queue worker are deprecated. Switch to flag arguments."
+        )
+        worker = _queue_worker_from_argv(predictor, *args.positional_args)
+    else:
+        worker = RedisQueueWorker(
+            predictor=predictor,
+            redis_host=args.redis_host,
+            redis_port=args.redis_port,
+            input_queue=args.input_queue,
+            upload_url=args.upload_url,
+            consumer_id=args.consumer_id,
+            model_id=args.model_id,
+            predict_timeout=args.predict_timeout,
+        )
+
     worker.start()
