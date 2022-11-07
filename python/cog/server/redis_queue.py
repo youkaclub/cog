@@ -130,7 +130,7 @@ class RedisQueueWorker:
             start_time = time.time()
 
             # TODO(bfirsh): setup should time out too, but we don't display these logs to the user, so don't timeout to avoid confusion
-            self.runner.setup()
+            self.worker.setup()
 
             setup_time = time.time() - start_time
             self.redis.xadd(
@@ -225,7 +225,7 @@ class RedisQueueWorker:
                 sys.stderr.write(f"Failed to handle message: {tb}\n")
 
         sys.stderr.write("Closing runner, bye bye!\n")
-        self.runner.close()
+        self.worker.shutdown()
 
     def handle_message(
         self,
@@ -252,137 +252,62 @@ class RedisQueueWorker:
 
         cleanup_functions.append(input_obj.cleanup)
 
-        self.runner.run(**input_obj.dict())
-
         response["started_at"] = format_datetime(started_at)
-
         response["logs"] = ""
 
-        send_response(response)
-
-        # just send logs until output starts
-        while self.runner.is_processing() and not self.runner.has_output_waiting():
-            # TODO: restructure this to avoid the tight CPU-eating loop
-            # TODO: DRY this up
+        was_canceled = False
+        done_event = None
+        for event in self.worker.predict(**input_obj.dict()):
+            if was_canceled:
+                continue
             if should_cancel():
-                self.runner.cancel()
+                was_canceled = True
+                self.worker.cancel()
                 response["status"] = Status.CANCELED
                 response["completed_at"] = format_datetime(datetime.datetime.now())
                 send_response(response)
-                return
 
-            if self.runner.has_logs_waiting():
-                response["logs"] += self.runner.read_logs()
+            if isinstance(event, Heartbeat):
+                pass
+            elif isinstance(event, Log):
+                response["logs"] += event.message
                 send_response(response)
+            elif isinstance(event, PredictionOutput):
+                # TODO be defensive about multi vs single swapping mid-prediction
+                output = self.upload_files(event.payload)
+                if event.multi:
+                    if "output" not in response:
+                        response["output"] = []
+                    response["output"].append(output)
+                    send_response(response)
+                else:
+                    response["output"] = output
 
-            if not self.runner.is_alive():
+            elif isinstance(event, Done):
+                done_event = event
+            else:
+                sys.stderr.write(f"Received unexpected event from worker: {event}")
+
+        completed_at = datetime.datetime.now()
+        response["completed_at"] = format_datetime(completed_at)
+
+        if done_event:
+            if done_event.error:
                 response["status"] = Status.FAILED
-                response["error"] = "Prediction failed for an unknown reason. It might have run out of memory?"
-                response["completed_at"] = format_datetime(datetime.datetime.now())
-                send_response(response)
-                span.add_event(name="exception", attributes={"exception.type": "unhandled_error"})
-                span.set_status(TraceStatus(status_code=StatusCode.ERROR))
-                self.should_exit = True
-                return
-
-        if self.runner.error() is not None:
-            response["status"] = Status.FAILED
-            response["error"] = str(self.runner.error())  # type: ignore
-            response["completed_at"] = format_datetime(datetime.datetime.now())
-            send_response(response)
-            span.record_exception(self.runner.error())
-            span.set_status(TraceStatus(status_code=StatusCode.ERROR))
-            return
-
-        span.add_event("received first output")
-
-        if self.runner.is_output_generator():
-            output = response["output"] = []
-
-            while self.runner.is_processing():
-                # TODO: restructure this to avoid the tight CPU-eating loop
-                if should_cancel():
-                    self.runner.cancel()
-                    response["status"] = Status.CANCELED
-                    response["completed_at"] = format_datetime(datetime.datetime.now())
-                    send_response(response)
-                    return
-
-                if self.runner.has_output_waiting() or self.runner.has_logs_waiting():
-                    # Object has already passed through `make_encodeable()` in the Runner, so all we need to do here is upload the files
-                    new_output = [
-                        self.upload_files(o) for o in self.runner.read_output()
-                    ]
-                    new_logs = self.runner.read_logs()
-
-                    # sometimes it'll say there's output when there's none
-                    if new_output == [] and new_logs == "":
-                        continue
-
-                    output.extend(new_output)
-                    response["logs"] += new_logs
-
-                    # we could `time.sleep(0.1)` and check `is_processing()`
-                    # here to give the predictor subprocess a chance to exit
-                    # so we don't send a double message for final output, at
-                    # the cost of extra latency
-                    send_response(response)
-
-                if not self.runner.is_alive():
-                    response["status"] = Status.FAILED
-                    response["error"] = "Prediction failed for an unknown reason. It might have run out of memory?"
-                    response["completed_at"] = format_datetime(datetime.datetime.now())
-                    send_response(response)
-                    span.add_event(name="exception", attributes={"exception.type": "unhandled_error"})
-                    span.set_status(TraceStatus(status_code=StatusCode.ERROR))
-                    self.should_exit = True
-                    return
-
-            if self.runner.error() is not None:
-                response["status"] = Status.FAILED
-                response["error"] = str(self.runner.error())  # type: ignore
-                response["completed_at"] = format_datetime(datetime.datetime.now())
-                send_response(response)
-                span.record_exception(self.runner.error())
-                span.set_status(TraceStatus(status_code=StatusCode.ERROR))
-                return
-
-            span.add_event("received final output")
-
-            response["status"] = Status.SUCCEEDED
-            completed_at = datetime.datetime.now()
-            response["completed_at"] = format_datetime(completed_at)
-            response["metrics"] = {
-                "predict_time": (completed_at - started_at).total_seconds()
-            }
-            output.extend(self.upload_files(o) for o in self.runner.read_output())
-            response["logs"] += self.runner.read_logs()
-            send_response(response)
-
+                response["error"] = str(done_event.error_detail)
+            else:
+                response["status"] = Status.SUCCEEDED
+                response["metrics"] = {
+                    "predict_time": (completed_at - started_at).total_seconds()
+                }
         else:
-            if self.runner.error() is not None:
-                response["status"] = Status.FAILED
-                response["error"] = str(self.runner.error())  # type: ignore
-                response["completed_at"] = format_datetime(datetime.datetime.now())
-                send_response(response)
-                span.record_exception(self.runner.error())
-                span.set_status(TraceStatus(status_code=StatusCode.ERROR))
-                return
+            response["status"] = Status.FAILED
+            response[
+                "error"
+            ] = "Prediction failed for an unknown reason. It might have run out of memory?"
+            self.should_exit = True
 
-            output = self.runner.read_output()
-            while len(output) == 0:
-                output = self.runner.read_output()
-            assert len(output) == 1
-
-            response["status"] = Status.SUCCEEDED
-            completed_at = datetime.datetime.now()
-            response["completed_at"] = format_datetime(completed_at)
-            response["metrics"] = {
-                "predict_time": (completed_at - started_at).total_seconds()
-            }
-            response["output"] = self.upload_files(output[0])
-            response["logs"] += self.runner.read_logs()
-            send_response(response)
+        send_response(response)
 
     def download(self, url: str) -> bytes:
         resp = requests.get(url)
