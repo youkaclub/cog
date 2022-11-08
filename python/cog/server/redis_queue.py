@@ -1,38 +1,45 @@
+import contextlib
 import datetime
 import io
 import json
 import os
+import signal
+import sys
+import time
+import traceback
+import types
 from mimetypes import guess_type
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
-import signal
-import sys
-import traceback
-import time
-import types
-import contextlib
 
-from pydantic import ValidationError
 import redis
 import requests
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+    OTLPSpanExporter,
+)  # type: ignore
+from opentelemetry.sdk.trace import TracerProvider  # type: ignore
+from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore
+from opentelemetry.trace import Status as TraceStatus
+from opentelemetry.trace import StatusCode
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from pydantic import ValidationError
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
-from ..predictor import get_input_type, get_predictor_ref, load_predictor_from_ref, load_config
-from ..json import upload_files
-from ..response import Status
 from ..files import guess_filename
-from .eventtypes import Heartbeat, Log, PredictionOutput, PredictionOutputType, Done
+from ..json import upload_files
+from ..predictor import (
+    get_input_type,
+    get_predictor_ref,
+    load_config,
+    load_predictor_from_ref,
+)
+from ..response import Status
+from .eventtypes import Done, Heartbeat, Log, PredictionOutput, PredictionOutputType
 from .response_throttler import ResponseThrottler
 from .worker import Worker
-
-from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter  # type: ignore
-from opentelemetry.sdk.trace import TracerProvider  # type: ignore
-from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore
-from opentelemetry.trace import Status as TraceStatus, StatusCode
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 
 class RedisQueueWorker:
@@ -267,26 +274,15 @@ class RedisQueueWorker:
 
         try:
             for event in self.worker.predict(payload=input_obj.dict(), poll=0.1):
-                if timed_out or was_canceled:
-                    continue
-
-                if should_cancel():
+                if not was_canceled and should_cancel():
                     was_canceled = True
                     self.worker.cancel()
-                    response["status"] = Status.CANCELED
-                    response["completed_at"] = format_datetime(datetime.datetime.now())
-                    send_response(response)
-                    continue
 
-                runtime = (datetime.datetime.now() - started_at).total_seconds()
-                if runtime > self.predict_timeout:
-                    timed_out = True
-                    self.worker.cancel()
-                    response["status"] = Status.FAILED
-                    response["error"] = "Prediction timed out"
-                    response["completed_at"] = format_datetime(datetime.datetime.now())
-                    send_response(response)
-                    continue
+                if not timed_out and self.predict_timeout:
+                    runtime = (datetime.datetime.now() - started_at).total_seconds()
+                    if runtime > self.predict_timeout:
+                        timed_out = True
+                        self.worker.cancel()
 
                 if isinstance(event, Heartbeat):
                     # Heartbeat events exist solely to ensure that we have a
@@ -308,7 +304,9 @@ class RedisQueueWorker:
                 elif isinstance(event, PredictionOutput):
                     # Note: this error message will be seen by users so it is
                     # intentionally vague about what has gone wrong.
-                    assert output_type is not None, "Predictor returned unexpected output"
+                    assert (
+                        output_type is not None
+                    ), "Predictor returned unexpected output"
 
                     output = self.upload_files(event.payload)
 
@@ -316,7 +314,9 @@ class RedisQueueWorker:
                         response["output"].append(output)
                         send_response(response)
                     else:
-                        assert response["output"] is None, "Predictor unexpectedly returned multiple outputs"
+                        assert (
+                            response["output"] is None
+                        ), "Predictor unexpectedly returned multiple outputs"
                         response["output"] = output
 
                 elif isinstance(event, Done):
@@ -327,7 +327,12 @@ class RedisQueueWorker:
             completed_at = datetime.datetime.now()
             response["completed_at"] = format_datetime(completed_at)
 
-            if done_event.error:
+            if done_event.canceled and was_canceled:
+                response["status"] = Status.CANCELED
+            elif done_event.canceled and timed_out:
+                response["status"] = Status.FAILED
+                response["error"] = "Prediction timed out"
+            elif done_event.error:
                 response["status"] = Status.FAILED
                 response["error"] = str(done_event.error_detail)
             else:
@@ -337,13 +342,12 @@ class RedisQueueWorker:
                 }
         except Exception as e:
             self.should_exit = True
+            completed_at = datetime.datetime.now()
+            response["completed_at"] = format_datetime(completed_at)
             response["status"] = Status.FAILED
             response["error"] = str(e)
         finally:
-            # TODO: we shouldn't really need to check/guard this call, and we
-            # should make everything that receives these requests idempotent
-            if not (timed_out or was_canceled):
-                send_response(response)
+            send_response(response)
 
     def download(self, url: str) -> bytes:
         resp = requests.get(url)

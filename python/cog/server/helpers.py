@@ -1,4 +1,3 @@
-import os
 import signal
 import sys
 from contextlib import AbstractContextManager, contextmanager
@@ -36,13 +35,3 @@ class redirect_streams(AbstractContextManager):
     def __exit__(self, exctype, excinst, exctb):
         sys.stdout = self._old_stdouts.pop()
         sys.stderr = self._old_stderrs.pop()
-
-
-@contextmanager
-def convert_signal_to_exception(signum, exc_type):
-    def _handler(signum, frame):
-        raise exc_type()
-
-    old_handler = signal.signal(signum, _handler)
-    yield
-    signal.signal(signum, old_handler)

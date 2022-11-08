@@ -6,15 +6,23 @@ import traceback
 import types
 from enum import Enum, auto, unique
 
-from ..predictor import load_predictor_from_ref
 from ..json import make_encodeable
-from .eventtypes import Heartbeat, Done, Log, PredictionInput, PredictionOutput, PredictionOutputType, Shutdown
-from .exceptions import CancellationException, InvalidStateException, FatalWorkerException
-from .helpers import (
-    ConnectionStream,
-    convert_signal_to_exception,
-    redirect_streams,
+from ..predictor import load_predictor_from_ref
+from .eventtypes import (
+    Done,
+    Heartbeat,
+    Log,
+    PredictionInput,
+    PredictionOutput,
+    PredictionOutputType,
+    Shutdown,
 )
+from .exceptions import (
+    CancelationException,
+    FatalWorkerException,
+    InvalidStateException,
+)
+from .helpers import ConnectionStream, redirect_streams
 
 _spawn = multiprocessing.get_context("spawn")
 
@@ -44,7 +52,6 @@ class Worker:
 
         return self._wait(raise_on_error="Predictor errored during setup")
 
-
     def predict(self, payload, poll=None):
         self._assert_state(WorkerState.READY)
         self._state = WorkerState.PROCESSING
@@ -53,21 +60,28 @@ class Worker:
         return self._wait(poll=poll)
 
     def shutdown(self):
-        if self._state != WorkerState.NEW:
-            self._terminating = True
+        if self._state == WorkerState.DEFUNCT:
+            return
+
+        self._terminating = True
+
+        if self._child.is_alive():
             self._events.send(Shutdown())
-            self._child.join()
-        self._state = WorkerState.DEFUNCT
 
     def terminate(self):
-        if self._state != WorkerState.NEW:
-            self._terminating = True
-            self._child.terminate()
-            self._child.join()
+        if self._state == WorkerState.DEFUNCT:
+            return
+
         self._state = WorkerState.DEFUNCT
 
+        if self._child.is_alive():
+            self._child.terminate()
+            self._child.join()
+        self._child.close()
+
     def cancel(self):
-        os.kill(self._child.pid, signal.SIGUSR1)
+        if self._state == WorkerState.PROCESSING and self._child.is_alive():
+            os.kill(self._child.pid, signal.SIGUSR1)
 
     def _assert_state(self, state):
         if self._state != state:
@@ -98,7 +112,6 @@ class Worker:
 
         if done:
             if done.error and raise_on_error:
-                self._state = WorkerState.DEFUNCT
                 raise FatalWorkerException(raise_on_error)
             else:
                 self._state = WorkerState.READY
@@ -117,9 +130,14 @@ class _ChildWorker(_spawn.Process):
         self._predictor_ref = predictor_ref
         self._predictor = None
         self._events = events
+        self._cancelable = False
+
         super().__init__()
 
     def run(self):
+        # We use SIGUSR1 to signal an interrupt for cancelation.
+        signal.signal(signal.SIGUSR1, self._signal_handler)
+
         stdout = ConnectionStream(self._events, Log, source="stdout")
         stderr = ConnectionStream(self._events, Log, source="stderr")
 
@@ -157,27 +175,29 @@ class _ChildWorker(_spawn.Process):
             except EOFError:
                 done.error = True
                 raise RuntimeError("Connection to Worker unexpectedly closed.")
-            finally:
-                self._events.send(done)
+            self._events.send(done)
 
     def _predict(self, done, payload):
         try:
-            with convert_signal_to_exception(signal.SIGUSR1, CancellationException):
-                result = self._predictor.predict(**payload)
-                if result:
-                    if isinstance(result, types.GeneratorType):
-                        self._events.send(PredictionOutputType(multi=True))
-                        for r in result:
-                            self._events.send(
-                                PredictionOutput(payload=make_encodeable(r))
-                            )
-                    else:
-                        self._events.send(PredictionOutputType(multi=False))
-                        self._events.send(
-                            PredictionOutput(payload=make_encodeable(result))
-                        )
-        except CancellationException:
-            done.cancelled = True
-        except Exception:
+            self._cancelable = True
+            result = self._predictor.predict(**payload)
+            if result:
+                if isinstance(result, types.GeneratorType):
+                    self._events.send(PredictionOutputType(multi=True))
+                    for r in result:
+                        self._events.send(PredictionOutput(payload=make_encodeable(r)))
+                else:
+                    self._events.send(PredictionOutputType(multi=False))
+                    self._events.send(PredictionOutput(payload=make_encodeable(result)))
+        except CancelationException:
+            done.canceled = True
+        except Exception as e:
             traceback.print_exc()
             done.error = True
+            done.error_detail = str(e)
+        finally:
+            self._cancelable = False
+
+    def _signal_handler(self, signum, frame):
+        if signum == signal.SIGUSR1 and self._cancelable:
+            raise CancelationException()

@@ -1,4 +1,4 @@
-class CancellationException(Exception):
+class CancelationException(Exception):
     pass
 
 

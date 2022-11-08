@@ -730,7 +730,7 @@ def test_queue_worker_unhandled_error(
                     "text": "bar",
                 },
                 "webhook": webhook_url,
-                "error": "Prediction failed for an unknown reason. It might have run out of memory?",
+                "error": "Prediction failed for an unknown reason. It might have run out of memory? (exitcode 1)",
                 "logs": mock.ANY,  # might include a stack trace (see above)
                 "output": None,
                 "status": "failed",
