@@ -44,12 +44,13 @@ class Worker:
 
         return self._wait(raise_on_error="Predictor errored during setup")
 
-    def predict(self, **kwargs):
+
+    def predict(self, payload, poll=None):
         self._assert_state(WorkerState.READY)
         self._state = WorkerState.PROCESSING
-        self._events.send(PredictionInput(payload=kwargs))
+        self._events.send(PredictionInput(payload=payload))
 
-        return self._wait()
+        return self._wait(poll=poll)
 
     def shutdown(self):
         if self._state != WorkerState.NEW:
@@ -86,7 +87,7 @@ class Worker:
         while self._child.is_alive() and not done:
             if not self._events.poll(poll):
                 if send_heartbeats:
-                    self.event.send(Heartbeat())
+                    yield Heartbeat()
                 continue
 
             ev = self._events.recv()
@@ -150,7 +151,7 @@ class _ChildWorker(_spawn.Process):
                 if isinstance(ev, Shutdown):
                     break
                 elif isinstance(ev, PredictionInput):
-                    self._predict(done, **ev.payload)
+                    self._predict(done, ev.payload)
                 else:
                     print(f"Got unexpected event: {ev}", file=sys.stderr)
             except EOFError:
@@ -159,10 +160,10 @@ class _ChildWorker(_spawn.Process):
             finally:
                 self._events.send(done)
 
-    def _predict(self, done, **kwargs):
+    def _predict(self, done, payload):
         try:
             with convert_signal_to_exception(signal.SIGUSR1, CancellationException):
-                result = self._predictor.predict(**kwargs)
+                result = self._predictor.predict(**payload)
                 if result:
                     if isinstance(result, types.GeneratorType):
                         self._events.send(PredictionOutputType(multi=True))

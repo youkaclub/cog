@@ -134,7 +134,7 @@ def test_fatalworkerexception_from_irrecoverable_failures(data, name, payloads):
     with pytest.raises(FatalWorkerException):
         for _ in range(5):
             payload = data.draw(st.fixed_dictionaries(payloads))
-            _process(w.predict(**payload))
+            _process(w.predict(payload))
 
     w.terminate()
 
@@ -150,7 +150,7 @@ def test_no_exceptions_from_recoverable_failures(data, name, payloads):
 
         for _ in range(5):
             payload = data.draw(st.fixed_dictionaries(payloads))
-            _process(w.predict(**payload))
+            _process(w.predict(payload))
     finally:
         w.terminate()
 
@@ -167,7 +167,7 @@ def test_output(data, name, payloads, output_generator):
         payload = data.draw(st.fixed_dictionaries(payloads))
         expected_output = output_generator(payload)
 
-        result = _process(w.predict(**payload))
+        result = _process(w.predict(payload))
 
         assert result.output == expected_output
     finally:
@@ -209,7 +209,7 @@ class WorkerState(RuleBasedStateMachine):
     @rule(target=predict_result, name=st.one_of(st.text(), names))
     def predict(self, name):
         try:
-            events = self.worker.predict(name=name)
+            events = self.worker.predict({"name": name})
             self.cancel_sent = False
             return events
         except InvalidStateException as e:

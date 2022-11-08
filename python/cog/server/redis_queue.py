@@ -62,7 +62,6 @@ class RedisQueueWorker:
         self.consumer_id = consumer_id
         self.model_id = model_id
         self.log_queue = log_queue
-        # TODO: use predict_timeout somewhere!
         self.predict_timeout = predict_timeout
         self.redis_db = redis_db
         if self.predict_timeout is not None:
@@ -261,13 +260,14 @@ class RedisQueueWorker:
 
         send_response(response)
 
+        timed_out = False
         was_canceled = False
         done_event = None
         output_type = None
 
         try:
-            for event in self.worker.predict(**input_obj.dict()):
-                if was_canceled:
+            for event in self.worker.predict(payload=input_obj.dict(), poll=0.1):
+                if timed_out or was_canceled:
                     continue
 
                 if should_cancel():
@@ -278,7 +278,22 @@ class RedisQueueWorker:
                     send_response(response)
                     continue
 
+                runtime = (datetime.datetime.now() - started_at).total_seconds()
+                if runtime > self.predict_timeout:
+                    timed_out = True
+                    self.worker.cancel()
+                    response["status"] = Status.FAILED
+                    response["error"] = "Prediction timed out"
+                    response["completed_at"] = format_datetime(datetime.datetime.now())
+                    send_response(response)
+                    continue
+
                 if isinstance(event, Heartbeat):
+                    # Heartbeat events exist solely to ensure that we have a
+                    # regular opportunity to check for cancelation and
+                    # timeouts.
+                    #
+                    # We don't need to do anything with them.
                     pass
                 elif isinstance(event, Log):
                     response["logs"] += event.message
@@ -325,7 +340,10 @@ class RedisQueueWorker:
             response["status"] = Status.FAILED
             response["error"] = str(e)
         finally:
-            send_response(response)
+            # TODO: we shouldn't really need to check/guard this call, and we
+            # should make everything that receives these requests idempotent
+            if not (timed_out or was_canceled):
+                send_response(response)
 
     def download(self, url: str) -> bytes:
         resp = requests.get(url)
