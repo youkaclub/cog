@@ -6,13 +6,13 @@ import traceback
 import types
 from enum import Enum, auto, unique
 
+from ..predictor import load_predictor_from_ref
 from ..json import make_encodeable
 from .eventtypes import Heartbeat, Done, Log, PredictionInput, PredictionOutput, PredictionOutputType, Shutdown
 from .exceptions import CancellationException, InvalidStateException, FatalWorkerException
 from .helpers import (
     ConnectionStream,
     convert_signal_to_exception,
-    load_predictor,
     redirect_streams,
 )
 
@@ -129,7 +129,7 @@ class _ChildWorker(_spawn.Process):
     def _setup(self):
         done = Done()
         try:
-            self._predictor = load_predictor(self._predictor_ref)
+            self._predictor = load_predictor_from_ref(self._predictor_ref)
             self._predictor.setup()
         except Exception:
             traceback.print_exc()
