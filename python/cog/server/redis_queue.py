@@ -19,12 +19,13 @@ import requests
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
-from ..predictor import BasePredictor, get_input_type, load_predictor, load_config
+from ..predictor import get_input_type, get_predictor_ref, load_predictor_from_ref, load_config
 from ..json import upload_files
 from ..response import Status
-from .runner import PredictionRunner
 from ..files import guess_filename
+from .eventtypes import Heartbeat, Log, PredictionOutput, PredictionOutputType, Done
 from .response_throttler import ResponseThrottler
+from .worker import Worker
 
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter  # type: ignore
@@ -42,7 +43,7 @@ class RedisQueueWorker:
 
     def __init__(
         self,
-        predictor: BasePredictor,
+        predictor_ref: str,
         redis_host: str,
         redis_port: int,
         input_queue: str,
@@ -53,7 +54,7 @@ class RedisQueueWorker:
         predict_timeout: Optional[int] = None,
         redis_db: int = 0,
     ):
-        self.runner = PredictionRunner(predict_timeout=predict_timeout)
+        self.worker = Worker(predictor_ref)
         self.redis_host = redis_host
         self.redis_port = redis_port
         self.input_queue = input_queue
@@ -61,6 +62,7 @@ class RedisQueueWorker:
         self.consumer_id = consumer_id
         self.model_id = model_id
         self.log_queue = log_queue
+        # TODO: use predict_timeout somewhere!
         self.predict_timeout = predict_timeout
         self.redis_db = redis_db
         if self.predict_timeout is not None:
@@ -71,6 +73,7 @@ class RedisQueueWorker:
             self.autoclaim_messages_after = 10 * 60
 
         # Set up types
+        predictor = load_predictor_from_ref(predictor_ref)
         self.InputType = get_input_type(predictor)
 
         self.redis = redis.Redis(
@@ -130,7 +133,9 @@ class RedisQueueWorker:
             start_time = time.time()
 
             # TODO(bfirsh): setup should time out too, but we don't display these logs to the user, so don't timeout to avoid confusion
-            self.worker.setup()
+            for event in self.worker.setup():
+                # TODO: send worker logs somewhere useful!
+                pass
 
             setup_time = time.time() - start_time
             self.redis.xadd(
@@ -235,7 +240,6 @@ class RedisQueueWorker:
         should_cancel: Callable,
     ) -> None:
         span = trace.get_current_span()
-
         started_at = datetime.datetime.now()
 
         try:
@@ -249,49 +253,65 @@ class RedisQueueWorker:
             span.record_exception(e)
             span.set_status(TraceStatus(status_code=StatusCode.ERROR))
             return
-
-        cleanup_functions.append(input_obj.cleanup)
+        finally:
+            cleanup_functions.append(input_obj.cleanup)
 
         response["started_at"] = format_datetime(started_at)
         response["logs"] = ""
 
+        send_response(response)
+
         was_canceled = False
         done_event = None
-        for event in self.worker.predict(**input_obj.dict()):
-            if was_canceled:
-                continue
-            if should_cancel():
-                was_canceled = True
-                self.worker.cancel()
-                response["status"] = Status.CANCELED
-                response["completed_at"] = format_datetime(datetime.datetime.now())
-                send_response(response)
+        output_type = None
 
-            if isinstance(event, Heartbeat):
-                pass
-            elif isinstance(event, Log):
-                response["logs"] += event.message
-                send_response(response)
-            elif isinstance(event, PredictionOutput):
-                # TODO be defensive about multi vs single swapping mid-prediction
-                output = self.upload_files(event.payload)
-                if event.multi:
-                    if "output" not in response:
-                        response["output"] = []
-                    response["output"].append(output)
+        try:
+            for event in self.worker.predict(**input_obj.dict()):
+                if was_canceled:
+                    continue
+
+                if should_cancel():
+                    was_canceled = True
+                    self.worker.cancel()
+                    response["status"] = Status.CANCELED
+                    response["completed_at"] = format_datetime(datetime.datetime.now())
                     send_response(response)
+                    continue
+
+                if isinstance(event, Heartbeat):
+                    pass
+                elif isinstance(event, Log):
+                    response["logs"] += event.message
+                    send_response(response)
+                elif isinstance(event, PredictionOutputType):
+                    # Note: this error message will be seen by users so it is
+                    # intentionally vague about what has gone wrong.
+                    assert output_type is None, "Predictor returned unexpected output"
+                    output_type = event
+                    if output_type.multi:
+                        response["output"] = []
+                elif isinstance(event, PredictionOutput):
+                    # Note: this error message will be seen by users so it is
+                    # intentionally vague about what has gone wrong.
+                    assert output_type is not None, "Predictor returned unexpected output"
+
+                    output = self.upload_files(event.payload)
+
+                    if output_type.multi:
+                        response["output"].append(output)
+                        send_response(response)
+                    else:
+                        assert response["output"] is None, "Predictor unexpectedly returned multiple outputs"
+                        response["output"] = output
+
+                elif isinstance(event, Done):
+                    done_event = event
                 else:
-                    response["output"] = output
+                    sys.stderr.write(f"Received unexpected event from worker: {event}")
 
-            elif isinstance(event, Done):
-                done_event = event
-            else:
-                sys.stderr.write(f"Received unexpected event from worker: {event}")
+            completed_at = datetime.datetime.now()
+            response["completed_at"] = format_datetime(completed_at)
 
-        completed_at = datetime.datetime.now()
-        response["completed_at"] = format_datetime(completed_at)
-
-        if done_event:
             if done_event.error:
                 response["status"] = Status.FAILED
                 response["error"] = str(done_event.error_detail)
@@ -300,14 +320,12 @@ class RedisQueueWorker:
                 response["metrics"] = {
                     "predict_time": (completed_at - started_at).total_seconds()
                 }
-        else:
-            response["status"] = Status.FAILED
-            response[
-                "error"
-            ] = "Prediction failed for an unknown reason. It might have run out of memory?"
+        except Exception as e:
             self.should_exit = True
-
-        send_response(response)
+            response["status"] = Status.FAILED
+            response["error"] = str(e)
+        finally:
+            send_response(response)
 
     def download(self, url: str) -> bytes:
         resp = requests.get(url)
@@ -406,7 +424,7 @@ def ensure_trailing_slash(url: str) -> str:
 
 
 def _queue_worker_from_argv(
-    predictor: BasePredictor,
+    predictor_ref: str,
     redis_host: str,
     redis_port: str,
     input_queue: str,
@@ -426,7 +444,7 @@ def _queue_worker_from_argv(
     else:
         predict_timeout_int = None
     return RedisQueueWorker(
-        predictor,
+        predictor_ref,
         redis_host,
         int(redis_port),
         input_queue,
@@ -447,7 +465,7 @@ if __name__ == "__main__":
         trace.get_tracer_provider().add_span_processor(span_processor)
 
     config = load_config()
-    predictor = load_predictor(config)
+    predictor_ref = get_predictor_ref(config)
 
-    worker = _queue_worker_from_argv(predictor, *sys.argv[1:])
+    worker = _queue_worker_from_argv(predictor_ref, *sys.argv[1:])
     worker.start()
