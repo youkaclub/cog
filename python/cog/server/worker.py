@@ -22,7 +22,7 @@ from .exceptions import (
     FatalWorkerException,
     InvalidStateException,
 )
-from .helpers import ConnectionStream, redirect_streams
+from .helpers import StreamRedirector
 
 _spawn = multiprocessing.get_context("spawn")
 
@@ -138,12 +138,14 @@ class _ChildWorker(_spawn.Process):
         # We use SIGUSR1 to signal an interrupt for cancelation.
         signal.signal(signal.SIGUSR1, self._signal_handler)
 
-        stdout = ConnectionStream(self._events, Log, source="stdout")
-        stderr = ConnectionStream(self._events, Log, source="stderr")
+        self._stream_redirector = StreamRedirector(self._events)
+        self._stream_redirector.redirect()
+        self._stream_redirector.start()
 
-        with redirect_streams(stdout, stderr):
-            self._setup()
-            self._loop()
+        self._setup()
+        self._loop()
+
+        self._stream_redirector.shutdown()
 
     def _setup(self):
         done = Done()
@@ -158,6 +160,7 @@ class _ChildWorker(_spawn.Process):
             done.error = True
             raise
         finally:
+            self._stream_redirector.drain()
             self._events.send(done)
 
     def _loop(self):
@@ -175,6 +178,7 @@ class _ChildWorker(_spawn.Process):
             except EOFError:
                 done.error = True
                 raise RuntimeError("Connection to Worker unexpectedly closed.")
+            self._stream_redirector.drain()
             self._events.send(done)
 
     def _predict(self, done, payload):

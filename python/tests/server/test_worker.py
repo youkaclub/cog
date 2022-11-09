@@ -85,7 +85,7 @@ PREDICT_LOGS_FIXTURES = [
         "logging",
         {},
         ("writing from C\n" "writing with print\n"),
-        ("writing log message\n" "writing to stderr\n"),
+        ("WARNING:root:writing log message\n" "writing to stderr\n"),
     )
 ]
 
@@ -250,8 +250,7 @@ def test_setup_logging(name, expected_stdout, expected_stderr):
 @pytest.mark.parametrize(
     "name,payloads,expected_stdout,expected_stderr", PREDICT_LOGS_FIXTURES
 )
-@given(data=st.data())
-def test_predict_logging(data, name, payloads, expected_stdout, expected_stderr):
+def test_predict_logging(name, payloads, expected_stdout, expected_stderr):
     """
     We should get the logs we expect from predictors that generate logs during
     predict.
@@ -262,8 +261,7 @@ def test_predict_logging(data, name, payloads, expected_stdout, expected_stderr)
         result = _process(w.setup())
         assert not result.done.error
 
-        payload = data.draw(st.fixed_dictionaries(payloads))
-        result = _process(w.predict(payload))
+        result = _process(w.predict({}))
 
         assert result.stdout == expected_stdout
         assert result.stderr == expected_stderr
