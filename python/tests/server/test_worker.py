@@ -15,7 +15,13 @@ from hypothesis.stateful import (
     precondition,
 )
 
-from cog.server.eventtypes import Log, Done, Heartbeat, PredictionOutput, PredictionOutputType
+from cog.server.eventtypes import (
+    Log,
+    Done,
+    Heartbeat,
+    PredictionOutput,
+    PredictionOutputType,
+)
 from cog.server.exceptions import InvalidStateException, FatalWorkerException
 from cog.server.worker import Worker
 
@@ -62,16 +68,37 @@ OUTPUT_FIXTURES = [
     ("complex_output", {}, lambda _: {"number": 42, "text": "meaning of life"}),
 ]
 
+SETUP_LOGS_FIXTURES = [
+    (
+        "logging",
+        (
+            "writing some stuff from C at import time\n"
+            "writing to stdout at import time\n"
+            "setting up predictor\n"
+        ),
+        "writing to stderr at import time\n",
+    )
+]
+
+PREDICT_LOGS_FIXTURES = [
+    (
+        "logging",
+        {},
+        ("writing from C\n" "writing with print\n"),
+        ("writing log message\n" "writing to stderr\n"),
+    )
+]
+
 
 @define
 class Result:
     stdout: str = ""
     stderr: str = ""
     heartbeat_count: int = 0
-    output_type: PredictionOutputType|None = None
+    output_type: PredictionOutputType | None = None
     output: Any = None
-    done: Done|None = None
-    exception: Exception|None = None
+    done: Done | None = None
+    exception: Exception | None = None
 
 
 def _process(events, swallow_exceptions=False):
@@ -98,10 +125,14 @@ def _process(events, swallow_exceptions=False):
                 if result.output_type.multi:
                     result.output.append(event.payload)
                 else:
-                    assert result.output is None, "Should not get multiple outputs for output type single"
+                    assert (
+                        result.output is None
+                    ), "Should not get multiple outputs for output type single"
                     result.output = event.payload
             elif isinstance(event, PredictionOutputType):
-                assert result.output_type is None, "Should not get multiple output type events"
+                assert (
+                    result.output_type is None
+                ), "Should not get multiple output type events"
                 result.output_type = event
                 if result.output_type.multi:
                     result.output = []
@@ -194,6 +225,48 @@ def test_output(data, name, payloads, output_generator):
         result = _process(w.predict(payload))
 
         assert result.output == expected_output
+    finally:
+        w.terminate()
+
+
+@pytest.mark.parametrize("name,expected_stdout,expected_stderr", SETUP_LOGS_FIXTURES)
+def test_setup_logging(name, expected_stdout, expected_stderr):
+    """
+    We should get the logs we expect from predictors that generate logs during
+    setup.
+    """
+    w = Worker(predictor_ref=_fixture_path(name))
+
+    try:
+        result = _process(w.setup())
+        assert not result.done.error
+
+        assert result.stdout == expected_stdout
+        assert result.stderr == expected_stderr
+    finally:
+        w.terminate()
+
+
+@pytest.mark.parametrize(
+    "name,payloads,expected_stdout,expected_stderr", PREDICT_LOGS_FIXTURES
+)
+@given(data=st.data())
+def test_predict_logging(data, name, payloads, expected_stdout, expected_stderr):
+    """
+    We should get the logs we expect from predictors that generate logs during
+    predict.
+    """
+    w = Worker(predictor_ref=_fixture_path(name))
+
+    try:
+        result = _process(w.setup())
+        assert not result.done.error
+
+        payload = data.draw(st.fixed_dictionaries(payloads))
+        result = _process(w.predict(payload))
+
+        assert result.stdout == expected_stdout
+        assert result.stderr == expected_stderr
     finally:
         w.terminate()
 
@@ -333,8 +406,6 @@ def test_graceful_shutdown():
         assert result.output == "done in 1 seconds"
     finally:
         w.terminate()
-
-
 
 
 class WorkerState(RuleBasedStateMachine):
