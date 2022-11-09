@@ -235,7 +235,7 @@ class RedisQueueWorker:
                 tb = traceback.format_exc()
                 sys.stderr.write(f"Failed to handle message: {tb}\n")
 
-        sys.stderr.write("Closing runner, bye bye!\n")
+        sys.stderr.write("Shutting down worker: bye bye!\n")
         self.worker.shutdown()
 
     def handle_message(
