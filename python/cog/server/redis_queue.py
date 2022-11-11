@@ -194,45 +194,12 @@ class RedisQueueWorker:
 
                     should_cancel = self.cancelation_checker(message.get("cancel_key"))
 
-                    # use the request message as the basis of our response so
-                    # that we echo back any additional fields sent to us
-                    response = message
-                    response["status"] = Status.PROCESSING
-                    response["output"] = None
-                    response["logs"] = ""
-
-                    cleanup_functions: List[Callable] = []
-                    try:
-                        start_time = time.time()
-                        self.handle_message(
-                            send_response, response, cleanup_functions, should_cancel
-                        )
-                        self.redis.xack(self.input_queue, self.input_queue, message_id)
-                        self.redis.xdel(
-                            self.input_queue, message_id
-                        )  # xdel to be able to get stream size
-                        run_time = time.time() - start_time
-                        self.redis.xadd(
-                            self.predict_time_queue,
-                            fields={"duration": run_time},
-                            maxlen=self.stats_queue_length,
-                        )
-                        sys.stderr.write(f"Run time for {message_id}: {run_time:.2f}\n")
-                    except Exception as e:
-                        response["status"] = Status.FAILED
-                        response["error"] = str(e)
-                        response["completed_at"] = format_datetime(
-                            datetime.datetime.now()
-                        )
+                    for response in self.run_prediction(message, should_cancel):
                         send_response(response)
-                        self.redis.xack(self.input_queue, self.input_queue, message_id)
-                        self.redis.xdel(self.input_queue, message_id)
-                    finally:
-                        for cleanup_function in cleanup_functions:
-                            try:
-                                cleanup_function()
-                            except Exception as e:
-                                sys.stderr.write(f"Cleanup function caught error: {e}")
+
+                    self.redis.xack(self.input_queue, self.input_queue, message_id)
+                    self.redis.xdel(self.input_queue, message_id)
+
             except Exception as e:
                 tb = traceback.format_exc()
                 sys.stderr.write(f"Failed to handle message: {tb}\n")
@@ -240,119 +207,126 @@ class RedisQueueWorker:
         sys.stderr.write("Shutting down worker: bye bye!\n")
         self.worker.shutdown()
 
-    def handle_message(
-        self,
-        send_response: Callable,
-        response: Dict[str, Any],
-        cleanup_functions: List[Callable],
-        should_cancel: Callable,
-    ) -> None:
-        span = trace.get_current_span()
-        started_at = datetime.datetime.now()
-
-        try:
-            input_obj = self.InputType(**response["input"])
-        except ValidationError as e:
-            tb = traceback.format_exc()
-            sys.stderr.write(tb)
-            response["status"] = Status.FAILED
-            response["error"] = str(e)
-            send_response(response)
-            span.record_exception(e)
-            span.set_status(TraceStatus(status_code=StatusCode.ERROR))
-            return
-
-        cleanup_functions.append(input_obj.cleanup)
-
-        response["started_at"] = format_datetime(started_at)
+    def run_prediction(self, message, should_cancel):
+        # use the request message as the basis of our response so
+        # that we echo back any additional fields sent to us
+        response = message
+        response["status"] = Status.PROCESSING
+        response["output"] = None
         response["logs"] = ""
 
-        send_response(response)
-
-        timed_out = False
-        was_canceled = False
-        done_event = None
-        output_type = None
-
         try:
-            for event in self.worker.predict(payload=input_obj.dict(), poll=0.1):
-                if not was_canceled and should_cancel():
-                    was_canceled = True
-                    self.worker.cancel()
+            started_at = datetime.datetime.now()
 
-                if not timed_out and self.predict_timeout:
-                    runtime = (datetime.datetime.now() - started_at).total_seconds()
-                    if runtime > self.predict_timeout:
-                        timed_out = True
+            input_obj = self.InputType(**response["input"])
+
+            response["started_at"] = format_datetime(started_at)
+            response["logs"] = ""
+
+            yield response
+
+            timed_out = False
+            was_canceled = False
+            done_event = None
+            output_type = None
+
+            try:
+                for event in self.worker.predict(payload=input_obj.dict(), poll=0.1):
+                    if not was_canceled and should_cancel():
+                        was_canceled = True
                         self.worker.cancel()
 
-                if isinstance(event, Heartbeat):
-                    # Heartbeat events exist solely to ensure that we have a
-                    # regular opportunity to check for cancelation and
-                    # timeouts.
-                    #
-                    # We don't need to do anything with them.
-                    pass
-                elif isinstance(event, Log):
-                    response["logs"] += event.message
-                    send_response(response)
-                elif isinstance(event, PredictionOutputType):
-                    # Note: this error message will be seen by users so it is
-                    # intentionally vague about what has gone wrong.
-                    assert output_type is None, "Predictor returned unexpected output"
-                    output_type = event
-                    if output_type.multi:
-                        response["output"] = []
-                elif isinstance(event, PredictionOutput):
-                    # Note: this error message will be seen by users so it is
-                    # intentionally vague about what has gone wrong.
-                    assert (
-                        output_type is not None
-                    ), "Predictor returned unexpected output"
+                    if not timed_out and self.predict_timeout:
+                        runtime = (datetime.datetime.now() - started_at).total_seconds()
+                        if runtime > self.predict_timeout:
+                            timed_out = True
+                            self.worker.cancel()
 
-                    output = self.upload_files(event.payload)
-
-                    if output_type.multi:
-                        response["output"].append(output)
-                        send_response(response)
-                    else:
+                    if isinstance(event, Heartbeat):
+                        # Heartbeat events exist solely to ensure that we have a
+                        # regular opportunity to check for cancelation and
+                        # timeouts.
+                        #
+                        # We don't need to do anything with them.
+                        pass
+                    elif isinstance(event, Log):
+                        response["logs"] += event.message
+                        yield response
+                    elif isinstance(event, PredictionOutputType):
+                        # Note: this error message will be seen by users so it is
+                        # intentionally vague about what has gone wrong.
                         assert (
-                            response["output"] is None
-                        ), "Predictor unexpectedly returned multiple outputs"
-                        response["output"] = output
+                            output_type is None
+                        ), "Predictor returned unexpected output"
+                        output_type = event
+                        if output_type.multi:
+                            response["output"] = []
+                    elif isinstance(event, PredictionOutput):
+                        # Note: this error message will be seen by users so it is
+                        # intentionally vague about what has gone wrong.
+                        assert (
+                            output_type is not None
+                        ), "Predictor returned unexpected output"
 
-                elif isinstance(event, Done):
-                    done_event = event
+                        output = self.upload_files(event.payload)
+
+                        if output_type.multi:
+                            response["output"].append(output)
+                            yield response
+                        else:
+                            assert (
+                                response["output"] is None
+                            ), "Predictor unexpectedly returned multiple outputs"
+                            response["output"] = output
+
+                    elif isinstance(event, Done):
+                        # TODO assert we only get one Done
+                        done_event = event
+                    else:
+                        sys.stderr.write(
+                            f"Received unexpected event from worker: {event}"
+                        )
+
+                completed_at = datetime.datetime.now()
+                response["completed_at"] = format_datetime(completed_at)
+
+                # It should only be possible to get here if we got a done event.
+                assert done_event
+
+                if done_event.canceled and was_canceled:
+                    response["status"] = Status.CANCELED
+                elif done_event.canceled and timed_out:
+                    response["status"] = Status.FAILED
+                    response["error"] = "Prediction timed out"
+                elif done_event.error:
+                    response["status"] = Status.FAILED
+                    response["error"] = str(done_event.error_detail)
                 else:
-                    sys.stderr.write(f"Received unexpected event from worker: {event}")
-
-            completed_at = datetime.datetime.now()
-            response["completed_at"] = format_datetime(completed_at)
-
-            # It should only be possible to get here if we got a done event.
-            assert done_event
-
-            if done_event.canceled and was_canceled:
-                response["status"] = Status.CANCELED
-            elif done_event.canceled and timed_out:
+                    response["status"] = Status.SUCCEEDED
+                    response["metrics"] = {
+                        "predict_time": (completed_at - started_at).total_seconds()
+                    }
+            except Exception as e:
+                self.should_exit = True
+                completed_at = datetime.datetime.now()
+                response["completed_at"] = format_datetime(completed_at)
                 response["status"] = Status.FAILED
-                response["error"] = "Prediction timed out"
-            elif done_event.error:
-                response["status"] = Status.FAILED
-                response["error"] = str(done_event.error_detail)
-            else:
-                response["status"] = Status.SUCCEEDED
-                response["metrics"] = {
-                    "predict_time": (completed_at - started_at).total_seconds()
-                }
+                response["error"] = str(e)
+            finally:
+                yield response
+
         except Exception as e:
-            self.should_exit = True
-            completed_at = datetime.datetime.now()
-            response["completed_at"] = format_datetime(completed_at)
             response["status"] = Status.FAILED
             response["error"] = str(e)
+            if "started_at" in response:
+                completed_at = datetime.datetime.now()
+                response["completed_at"] = format_datetime(completed_at)
+            yield response
         finally:
-            send_response(response)
+            try:
+                input_obj.cleanup()
+            except Exception as e:
+                sys.stderr.write(f"Cleanup function caught error: {e}")
 
     def download(self, url: str) -> bytes:
         resp = requests.get(url)
