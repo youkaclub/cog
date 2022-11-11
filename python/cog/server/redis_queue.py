@@ -215,6 +215,11 @@ class RedisQueueWorker:
         response["output"] = None
         response["logs"] = ""
 
+        if "webhook_events" in message:
+            webhook_events = message["webhook_events"]
+        else:
+            webhook_events = ["start", "output", "done"]
+
         try:
             started_at = datetime.datetime.now()
 
@@ -223,7 +228,8 @@ class RedisQueueWorker:
             response["started_at"] = format_datetime(started_at)
             response["logs"] = ""
 
-            yield response
+            if "start" in webhook_events:
+                yield response
 
             timed_out = False
             was_canceled = False
@@ -251,7 +257,8 @@ class RedisQueueWorker:
                         pass
                     elif isinstance(event, Log):
                         response["logs"] += event.message
-                        yield response
+                        if "log" in webhook_events:
+                            yield response
                     elif isinstance(event, PredictionOutputType):
                         # Note: this error message will be seen by users so it is
                         # intentionally vague about what has gone wrong.
@@ -272,7 +279,8 @@ class RedisQueueWorker:
 
                         if output_type.multi:
                             response["output"].append(output)
-                            yield response
+                            if "output" in webhook_events:
+                                yield response
                         else:
                             assert (
                                 response["output"] is None
@@ -313,7 +321,8 @@ class RedisQueueWorker:
                 response["status"] = Status.FAILED
                 response["error"] = str(e)
             finally:
-                yield response
+                if "done" in webhook_events:
+                    yield response
 
         except Exception as e:
             response["status"] = Status.FAILED
@@ -321,7 +330,8 @@ class RedisQueueWorker:
             if "started_at" in response:
                 completed_at = datetime.datetime.now()
                 response["completed_at"] = format_datetime(completed_at)
-            yield response
+            if "done" in webhook_events:
+                yield response
         finally:
             try:
                 input_obj.cleanup()
